@@ -1,4 +1,5 @@
 # CLAUDE.md
+@COORDINATION.md
 
 GBrain is a personal knowledge brain and GStack mod for agent platforms. Pluggable
 engines: PGLite (embedded Postgres via WASM, zero-config default) or Postgres + pgvector

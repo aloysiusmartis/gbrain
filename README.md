@@ -80,12 +80,29 @@ Add to `~/.claude/server.json` (Claude Code), Settings > MCP Servers (Cursor), o
 ### Remote MCP (Claude Desktop, Cowork, Perplexity)
 
 ```bash
-ngrok http 8787 --url your-brain.ngrok.app
-bun run src/commands/auth.ts create "claude-desktop"
+gbrain auth create "claude-desktop"            # tokens via the existing CLI
+gbrain serve --http --port 8787                 # built-in HTTP transport (Postgres-only)
+ngrok http 8787 --url your-brain.ngrok.app      # any tunnel works
 claude mcp add gbrain -t http https://your-brain.ngrok.app/mcp -H "Authorization: Bearer TOKEN"
 ```
 
-Per-client guides: [`docs/mcp/`](docs/mcp/DEPLOY.md). ChatGPT requires OAuth 2.1 (not yet implemented).
+Per-client guides: [`docs/mcp/`](docs/mcp/DEPLOY.md). Hardening defaults, env vars, and threat model: [SECURITY.md](SECURITY.md). ChatGPT requires OAuth 2.1 (not yet implemented).
+
+### Using gbrain with GStack
+
+If your engineering agent runs on [GStack](https://github.com/garrytan/gstack), point it at gbrain for code lookup instead of grep+read. Cathedral II (v0.21.0) ships call-graph edges and two-pass retrieval — `/investigate`, `/review`, `/plan-eng-review`, and `/office-hours` all benefit when the agent walks the symbol graph instead of scanning files line by line.
+
+The five magical-moment commands:
+
+```bash
+gbrain code-callers searchKeyword           # who calls this symbol?
+gbrain code-callees searchKeyword           # what does this symbol call?
+gbrain code-def BrainEngine                 # where is X defined?
+gbrain code-refs BrainEngine                # all reference sites
+gbrain query "how does N+1 handling work" --near-symbol BrainEngine.searchKeyword --walk-depth 2
+```
+
+All five auto-emit JSON on non-TTY (gh-CLI convention) so a GStack subagent shelling out via bash gets a clean parseable response. Run `gbrain sources add <repo> --strategy code` to index a repo, then your agent's brain-first lookup covers code, not just markdown. ([Cathedral II release notes](CHANGELOG.md#0210---2026-04-25))
 
 ## The 29 Skills
 
@@ -343,6 +360,30 @@ accumulate rows across separate single-skill installs instead of overwriting eac
 Read [`skills/skillify/SKILL.md`](skills/skillify/SKILL.md) for the full 10-item checklist
 and the anti-patterns it catches.
 
+## Storage tiering: keep bulk content out of git (v0.22.11)
+
+When your brain crosses 100K files and bulk machine-generated content (tweets, articles, transcripts)
+becomes the size driver, declare which directories belong in git and which live in the database only.
+
+```yaml
+# gbrain.yml at the brain repo root
+storage:
+  db_tracked:
+    - people/
+    - companies/
+    - deals/
+  db_only:
+    - media/x/
+    - media/articles/
+    - meetings/transcripts/
+```
+
+`gbrain sync` auto-manages your `.gitignore` for `db_only` paths. `gbrain export --restore-only --repo .`
+repopulates missing files from the database (container restart, fresh clone, accidental rm).
+`gbrain storage status` shows the tier breakdown.
+
+Full guide: [docs/storage-tiering.md](docs/storage-tiering.md).
+
 ## Getting Data In
 
 GBrain ships integration recipes that your agent sets up for you. Each recipe tells the agent what credentials to ask for, how to validate, and what cron to register.
@@ -489,6 +530,8 @@ Question
   │    ├─ Multi-query expansion (Haiku rephrases the question 3 ways)
   │    ├─ Vector search (HNSW cosine over OpenAI embeddings)
   │    ├─ Keyword search (Postgres tsvector + websearch_to_tsquery)
+  │    ├─ Source-aware ranking (curated dirs outrank chat/daily swamp at SQL layer)
+  │    ├─ Hard-exclude (test/ archive/ attachments/ .raw/ filtered before retrieval)
   │    ├─ Reciprocal Rank Fusion (score = sum 1/(60+rank) across both)
   │    ├─ Cosine re-scoring (re-rank chunks against actual query embedding)
   │    ├─ Compiled-truth boost (assessments outrank timeline noise)
@@ -596,8 +639,11 @@ SEARCH
   gbrain query <question>              Hybrid search (vector + keyword + RRF)
 
 IMPORT
-  gbrain import <dir> [--no-embed]      Import markdown (idempotent)
-  gbrain sync [--repo <path>]           Git-to-brain incremental sync
+  gbrain import <dir> [--no-embed] [--workers N]
+                                        Import markdown (idempotent)
+  gbrain sync [--repo <path>] [--workers N]
+                                        Git-to-brain incremental sync
+                                        (>100-file diffs auto-parallelize 4 workers on Postgres)
   gbrain export [--dir ./out/]          Export to markdown
 
 FILES
@@ -639,6 +685,8 @@ ADMIN
   gbrain doctor --locks                 List idle-in-tx backends (57014 diagnostic, Postgres only)
   gbrain stats                          Brain statistics
   gbrain serve                          MCP server (stdio)
+  gbrain serve --http --port 8787       MCP server (HTTP, Postgres-only, bearer auth)
+  gbrain auth create|list|revoke|test   Token management for the HTTP transport
   gbrain integrations                   Integration recipe dashboard
   gbrain sources list|add|remove|...    Multi-source brain management (v0.18)
   gbrain dream [--dry-run] [--phase N]  One maintenance cycle then exit (cron-friendly)

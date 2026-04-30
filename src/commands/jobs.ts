@@ -32,6 +32,32 @@ export function parseMaxWaitingFlag(args: string[]): number | undefined {
   return Math.max(1, Math.min(100, parsed));
 }
 
+/** Parse `--max-rss N` (MB). Returns:
+ *  - 0 if the flag is absent (no watchdog by default for bare `jobs work`)
+ *  - 0 if `--max-rss 0` (explicit disable)
+ *  - the value if >= 256
+ *  Errors and exits the process if the flag is non-numeric, negative, or
+ *  positive but < 256 (likely a GB-vs-MB unit-confusion typo). */
+export function parseMaxRssFlag(args: string[]): number {
+  const raw = parseFlag(args, '--max-rss');
+  if (raw === undefined) return 0;
+  const parsed = parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    console.error(`Error: --max-rss must be a non-negative integer (MB), got "${raw}"`);
+    process.exit(1);
+  }
+  if (parsed === 0) return 0;
+  if (parsed < 256) {
+    console.error(
+      `Error: --max-rss ${parsed} is too low for production (likely a unit confusion: ` +
+      `--max-rss takes megabytes, not gigabytes). Use --max-rss 0 to disable, ` +
+      `or set a value >= 256.`
+    );
+    process.exit(1);
+  }
+  return parsed;
+}
+
 export function resolveWorkerConcurrency(args: string[], env: NodeJS.ProcessEnv = process.env): number {
   const raw = parseFlag(args, '--concurrency') ?? env.GBRAIN_WORKER_CONCURRENCY ?? '1';
   const parsed = parseInt(raw, 10);
@@ -106,11 +132,12 @@ USAGE
   gbrain jobs delete <id>
   gbrain jobs stats
   gbrain jobs smoke
-  gbrain jobs work [--queue Q] [--concurrency N]
+  gbrain jobs work [--queue Q] [--concurrency N] [--max-rss MB]
   gbrain jobs supervisor [start] [--detach] [--json]
                          [--concurrency N] [--queue Q] [--pid-file PATH]
                          [--max-crashes N] [--health-interval N]
                          [--allow-shell-jobs] [--cli-path PATH]
+                         [--max-rss MB]
   gbrain jobs supervisor status [--json] [--pid-file PATH]
   gbrain jobs supervisor stop [--json] [--pid-file PATH]
 
@@ -611,14 +638,19 @@ HANDLER TYPES (built in)
 
       const queueName = parseFlag(args, '--queue') ?? 'default';
       const concurrency = resolveWorkerConcurrency(args);
+      // --max-rss is opt-in for bare `gbrain jobs work` — preserves pre-v0.21 behavior
+      // for operators with legitimately large embed/import working sets. The supervisor
+      // path injects a default 2048; this code path does not.
+      const maxRssMb = parseMaxRssFlag(args);
 
       try { await queue.ensureSchema(); }
       catch (e) { console.error(e instanceof Error ? e.message : String(e)); process.exit(1); }
 
-      const worker = new MinionWorker(engine, { queue: queueName, concurrency });
+      const worker = new MinionWorker(engine, { queue: queueName, concurrency, maxRssMb });
       await registerBuiltinHandlers(worker, engine);
 
-      console.log(`Minion worker started (queue: ${queueName}, concurrency: ${concurrency})`);
+      const watchdogNote = maxRssMb > 0 ? `, watchdog: ${maxRssMb}MB` : '';
+      console.log(`Minion worker started (queue: ${queueName}, concurrency: ${concurrency}${watchdogNote})`);
       console.log(`Registered handlers: ${worker.registeredNames.join(', ')}`);
       await worker.start();
       break;
@@ -759,6 +791,11 @@ HANDLER TYPES (built in)
       const allowShellJobs = hasFlag(args, '--allow-shell-jobs') ||
                              !!process.env.GBRAIN_ALLOW_SHELL_JOBS;
       const detach = hasFlag(args, '--detach');
+      // Supervisor defaults --max-rss 2048 (MB) — main production path uses
+      // the supervisor, so the watchdog is on by default here. parseMaxRssFlag
+      // returns 0 when the flag is absent; substitute the supervisor default.
+      const maxRssRaw = parseMaxRssFlag(args);
+      const maxRssMb = parseFlag(args, '--max-rss') === undefined ? 2048 : maxRssRaw;
 
       const cliPath = parseFlag(args, '--cli-path') ?? resolveGbrainCliPath();
 
@@ -796,6 +833,7 @@ HANDLER TYPES (built in)
         cliPath,
         allowShellJobs,
         json: jsonMode,
+        maxRssMb,
         onEvent: (emission) => writeSupervisorEvent(emission, supervisorPid),
       });
 
@@ -826,8 +864,40 @@ export async function registerBuiltinHandlers(worker: MinionWorker, engine: Brai
     const { performSync } = await import('./sync.ts');
     const repoPath = typeof job.data.repoPath === 'string' ? job.data.repoPath : undefined;
     const noPull = !!job.data.noPull;
+    // noEmbed defaults to true (embed is a separate job — submit `embed --stale`
+    // after sync, OR run via the autopilot cycle which has its own embed phase).
+    // Caller can opt in by passing { noEmbed: false } in job params.
     const noEmbed = job.data.noEmbed !== false;
-    const result = await performSync(engine, { repoPath, noPull, noEmbed });
+    // v0.22.13 (PR #490 CODEX-1): resolve sourceId from job param OR by looking
+    // up the sources row for repoPath. Mirrors cycle.ts:480 — without this, a
+    // multi-source brain reads the global config.sync.last_commit anchor
+    // instead of sources.last_commit, which on a regularly-GC'd repo can drop
+    // out of git history and trigger 30-min full reimports every cycle.
+    let sourceId: string | undefined =
+      typeof job.data.sourceId === 'string' ? job.data.sourceId : undefined;
+    if (!sourceId && repoPath) {
+      try {
+        const rows = await engine.executeRaw<{ id: string }>(
+          `SELECT id FROM sources WHERE local_path = $1 LIMIT 1`,
+          [repoPath],
+        );
+        sourceId = rows[0]?.id;
+      } catch {
+        // sources table may not exist on very old brains — fall through to
+        // global config.sync.* anchor in performSync.
+      }
+    }
+    // v0.22.13 (PR #490 CODEX-4): route concurrency through the shared
+    // autoConcurrency helper instead of hardcoded 4. PGLite engines stay
+    // serial (forced 1); explicit job param wins; auto path defaults are
+    // applied inside performSync against the resolved file count.
+    const concurrencyOverride = typeof job.data.concurrency === 'number'
+      ? job.data.concurrency
+      : undefined;
+    const result = await performSync(engine, {
+      repoPath, sourceId, noPull, noEmbed,
+      concurrency: concurrencyOverride,
+    });
     return result;
   });
 
@@ -910,9 +980,19 @@ export async function registerBuiltinHandlers(worker: MinionWorker, engine: Brai
       ? job.data.repoPath
       : (await engine.getConfig('sync.repo_path')) ?? '.';
 
+    // Allow callers to select phases via job data (e.g. skip embed for
+    // fast cycles). Validates against ALL_PHASES to prevent injection.
+    const { ALL_PHASES } = await import('../core/cycle.ts');
+    const validPhases = new Set(ALL_PHASES);
+    const requestedPhases = Array.isArray(job.data.phases)
+      ? (job.data.phases as string[]).filter(p => validPhases.has(p as any))
+      : undefined;
+
     const report = await runCycle(engine, {
       brainDir: repoPath,
       pull: true, // autopilot daemon opts into git pull
+      signal: job.signal, // propagate abort so cycle bails on timeout/cancel
+      ...(requestedPhases && requestedPhases.length > 0 ? { phases: requestedPhases as any } : {}),
       yieldBetweenPhases: async () => {
         // Yield to the event loop so worker lock-renewal can fire.
         await new Promise<void>(r => setImmediate(r));

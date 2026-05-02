@@ -6,7 +6,7 @@ import { homedir } from 'os';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
-import { saveConfig, loadConfig, toEngineConfig, type GBrainConfig } from '../core/config.ts';
+import { saveConfig, loadConfig, toEngineConfig, gbrainPath, type GBrainConfig } from '../core/config.ts';
 import { createEngine } from '../core/engine-factory.ts';
 
 export async function runInit(args: string[]) {
@@ -169,7 +169,7 @@ async function initPGLite(opts: {
   customPath: string | null;
   aiOpts?: { embedding_model?: string; embedding_dimensions?: number; expansion_model?: string };
 }) {
-  const dbPath = opts.customPath || join(homedir(), '.gbrain', 'brain.pglite');
+  const dbPath = opts.customPath || gbrainPath('brain.pglite');
   console.log(`Setting up local brain with PGLite (no server needed)...`);
 
   // Configure AI gateway BEFORE initSchema so the vector column uses the right dim.

@@ -19,7 +19,7 @@ for (const op of operations) {
 }
 
 // CLI-only commands that bypass the operation layer
-const CLI_ONLY = new Set(['init', 'upgrade', 'post-upgrade', 'check-update', 'integrations', 'publish', 'check-backlinks', 'lint', 'report', 'import', 'export', 'files', 'embed', 'serve', 'call', 'config', 'doctor', 'migrate', 'eval', 'sync', 'extract', 'features', 'autopilot', 'graph-query', 'jobs', 'agent', 'apply-migrations', 'skillpack-check', 'skillpack', 'resolvers', 'integrity', 'repair-jsonb', 'orphans', 'sources', 'dream', 'check-resolvable', 'routing-eval', 'skillify', 'smoke-test', 'storage', 'repos', 'code-def', 'code-refs', 'reindex-code', 'code-callers', 'code-callees', 'frontmatter', 'auth']);
+const CLI_ONLY = new Set(['init', 'upgrade', 'post-upgrade', 'check-update', 'integrations', 'publish', 'check-backlinks', 'lint', 'report', 'import', 'export', 'files', 'embed', 'serve', 'call', 'config', 'doctor', 'migrate', 'eval', 'sync', 'extract', 'features', 'autopilot', 'graph-query', 'jobs', 'agent', 'apply-migrations', 'skillpack-check', 'skillpack', 'resolvers', 'integrity', 'repair-jsonb', 'orphans', 'sources', 'dream', 'check-resolvable', 'routing-eval', 'skillify', 'smoke-test', 'storage', 'repos', 'code-def', 'code-refs', 'reindex-code', 'code-callers', 'code-callees', 'frontmatter', 'auth', 'friction', 'claw-test']);
 
 async function main() {
   // Parse global flags (--quiet / --progress-json / --progress-interval)
@@ -343,6 +343,14 @@ async function handleCliOnly(command: string, args: string[]) {
     await runSkillpack(args);
     return;
   }
+  if (command === 'friction') {
+    const { runFriction } = await import('./commands/friction.ts');
+    process.exit(runFriction(args));
+  }
+  if (command === 'claw-test') {
+    const { runClawTest } = await import('./commands/claw-test.ts');
+    process.exit(await runClawTest(args));
+  }
   if (command === 'report') {
     const { runReport } = await import('./commands/report.ts');
     await runReport(args);
@@ -567,7 +575,7 @@ async function handleCliOnly(command: string, args: string[]) {
       }
       case 'repos': {
         // v0.19.0: `gbrain repos ...` is an alias into the v0.18.0 sources
-        // subsystem. The repos abstraction (Wintermute's baseline) was
+        // subsystem. The repos abstraction (Garry's OpenClaw baseline) was
         // redundant with sources and carried per-user config state that
         // couldn't participate in federation / RLS / multi-tenancy. We
         // keep the alias so scripts like `gbrain repos add .` keep

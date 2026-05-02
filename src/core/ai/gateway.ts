@@ -201,10 +201,12 @@ export async function embed(texts: string[]): Promise<Float32Array[]> {
   const truncated = texts.map(t => (t ?? '').slice(0, MAX_CHARS));
 
   try {
+    const embedTimeoutMs = parseInt(process.env.GBRAIN_EMBED_TIMEOUT_MS ?? "60000", 10);
     const result = await embedMany({
       model,
       values: truncated,
       providerOptions: dimsProviderOptions(recipe.implementation, modelId, cfg.embedding_dimensions ?? DEFAULT_EMBEDDING_DIMENSIONS),
+      abortSignal: AbortSignal.timeout(embedTimeoutMs),
     });
 
     // Verify dims match expectation; mismatch = likely misconfigured provider options.

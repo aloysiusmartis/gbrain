@@ -107,6 +107,7 @@ function runList(_args: string[]): void {
 }
 
 async function runTest(args: string[]): Promise<void> {
+  const config = loadConfig();
   const modelIdx = args.indexOf('--model');
   const modelArg = modelIdx >= 0 ? args[modelIdx + 1] : undefined;
 
@@ -119,6 +120,7 @@ async function runTest(args: string[]): Promise<void> {
     configureGateway({
       embedding_model: modelArg,
       embedding_dimensions: dims,
+      base_urls: config?.provider_base_urls,
       env: { ...process.env },
     });
   }
